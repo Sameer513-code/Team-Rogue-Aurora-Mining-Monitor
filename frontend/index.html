@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Mining Compliance Intelligence</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="icon" type="image/png" href="./hard-hat.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="uploadScreen" class="screen active">
+        <div class="upload-card">
+            <h1></h1>
+            <p>Upload mine boundaries to begin satellite analysis.</p>
+
+            <div class="upload-area">
+                <div class="input-group">
+                    <label>1. Legal Zone (GeoJSON)</label>
+                    <label for="legalFile" class="custom-file-upload" id="legalLabel">
+                        Choose Legal File
+                    </label>
+                    <input type="file" id="legalFile" accept=".geojson">
+                </div>
+
+                <div class="input-group">
+                    <label>2. No-Go Zone (GeoJSON)</label>
+                    <label for="nogoFile" class="custom-file-upload" id="nogoLabel">
+                        Choose No-Go File
+                    </label>
+                    <input type="file" id="nogoFile" accept=".geojson">
+                </div>
+            </div>
+
+            <button id="runBtn" disabled>
+                RUN ANALYSIS
+                <span class="btn-shine"></span>
+            </button>
+        </div>
+    </div>
+
+    <div id="loaderScreen" class="screen">
+        <div class="loader-box">
+            <div class="scanner-animation"></div>
+            <h2 id="loaderText">Processing Satellite Data...</h2>
+            <div class="progress-container">
+                <div class="progress-bar">
+                    <div id="progressFill"></div>
+                </div>
+                <div id="progressPercent">0%</div>
+            </div>
+            <p class="subtext">Processing Sentinel-2 Imagery & Geometry</p>
+        </div>
+    </div>
+
+    <div id="resultsScreen" class="screen">
+        <div class="topbar">
+            <div class="title">Mining Activity Intelligence Monitor</div>
+            <div class="meta">
+                <div class="tab-container">
+                    <button class="tab-btn active" data-tab="legal">Legal Zone</button>
+                    <button class="tab-btn" data-tab="nogo">No-Go Zone</button>
+                </div>
+                <div><b id="date">--/--/----</b></div>
+                <div>Status: <span id="status">--</span></div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="map" id="mapContainer">
+                <div id="mapCanvas" class="map-canvas"></div>
+                <div class="layers">
+                    <h5>Map Controls</h5>
+                    <div id="layerInfo">Visualizing Output</div>
+                </div>
+            </div>
+
+            <div class="splitter"></div>
+
+            <div class="panel" id="rightPanel">
+                <div class="topPane">
+                    <div class="kpis">
+                        <div class="kpi">
+                            <h4>Legal Excavated</h4>
+                            <div class="value" id="legalVal">0.00</div>
+                        </div>
+                        <div class="kpi">
+                            <h4>No-Go Impacted</h4>
+                            <div class="value" id="nogoVal">0.00</div>
+                        </div>
+                        <div class="kpi prediction-kpi">
+                            <h4>Predicted (Next Month)</h4>
+                            <div class="value" id="predictionVal">0.00</div>
+                        </div>
+                    </div>
+
+                    <div class="chart-container">
+                        <div class="chart-header">
+                            <h4>Excavation Trend</h4>
+                        </div>
+                        <canvas id="chart"></canvas>
+                    </div>
+
+                    <div class="slider-container">
+                        <div class="slider-label">
+                            <span>Time Travel</span>
+                            <span id="sliderValue"></span>
+                        </div>
+                        <input type="range" class="slider" id="slider" min="0" max="100" value="0">
+                    </div>
+                    
+                    <button class="quantified-btn" id="quantifiedBtn">View Quantified Maps</button>
+                </div>
+
+                <div class="vSplitter"></div>
+
+                <div class="bottomPane">
+                    <div class="timeline-header">
+                        <h4 class="hk">Violation Log</h4>
+                    </div>
+                    <div class="timeline" id="timeline">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">Quantified Segmentation Map</div>
+                <button class="modal-close" id="modalClose">x</button>
+            </div>
+            <div class="modal-image-container">
+                <img id="modalImage" class="modal-image" src="" alt="Analysis Map">
+            </div>
+            <div class="modal-slider-container">
+                <input type="range" class="slider" id="modalSlider" min="0" max="0" value="0">
+                <div style="margin-top:10px; text-align:center; color:#94a3b8" id="modalInfo"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script1.js"></script>
+</body>
+
+</html>

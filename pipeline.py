@@ -1,0 +1,472 @@
+import json
+import numpy as np
+import ee
+import time
+import os
+from google.oauth2 import service_account
+import requests
+
+# Global variable to track progress for the frontend
+PIPELINE_PROGRESS = {
+    "status": "idle",
+    "progress": 0,
+    "error": None
+}
+
+# t0 = time.time()
+
+def init_ee():
+    credentials = service_account.Credentials.from_service_account_file(
+        "key.json",  # Make sure key.json is in the root mining_app folder
+        scopes=["https://www.googleapis.com/auth/earthengine"]
+    )   
+    ee.Initialize(credentials)
+
+
+def km2(area_m2):
+    return area_m2.divide(1e6)
+
+def geojson_to_ee(geojson_dict):
+    return ee.Geometry(geojson_dict["features"][0]["geometry"])
+
+def mask_s2_clouds(img):
+    qa = img.select("QA60")
+    cloud  = 1 << 10
+    cirrus = 1 << 11
+    mask = qa.bitwiseAnd(cloud).eq(0).And(
+           qa.bitwiseAnd(cirrus).eq(0))
+    # This divides by 10000, resulting in 0.0 to 1.0 float range
+    return img.updateMask(mask).divide(10000)
+
+def get_monthly_s2_indices(year, month, geom):
+    start = ee.Date.fromYMD(year, month, 1)
+    end   = start.advance(1, "month")
+
+    col = (
+        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        .filterBounds(geom)
+        .filterDate(start, end)
+        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
+        .map(mask_s2_clouds)
+    )
+
+    size = col.size()
+
+    def build(img):
+        B4  = img.select("B4")
+        B8  = img.select("B8")
+        B11 = img.select("B11")
+
+        ndvi = B8.subtract(B4).divide(B8.add(B4)).rename("NDVI")
+        nbr  = B8.subtract(B11).divide(B8.add(B11)).rename("NBR")
+
+        return ee.Image.cat([ndvi, nbr])
+
+    return ee.Image(
+        ee.Algorithms.If(
+            size.gt(0),
+            build(col.median().clip(geom)),
+            ee.Image().rename([])
+        )
+    )
+
+def export_png(
+    image,
+    geom,
+    out_path,
+    bands=None,
+    min=0,
+    max=0.3, # CHANGED DEFAULT: 0.3 matches the 0-1 scale from mask_s2_clouds
+    dimensions=512
+):
+    """
+    Exports an EE Image (single or RGB) as PNG
+    """
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    params = {
+        "min": min,
+        "max": max,
+        "dimensions": dimensions,
+        "region": geom.bounds().getInfo()["coordinates"],
+        "format": "png"
+    }
+
+    if bands:
+        params["bands"] = bands
+
+    # If image is empty or fully masked, getThumbURL might fail or return blank.
+    try:
+        url = image.clip(geom).getThumbURL(params)
+        r = requests.get(url)
+        r.raise_for_status()
+        with open(out_path, "wb") as f:
+            f.write(r.content)
+    except Exception as e:
+        print(f"Error exporting {out_path}: {e}")
+
+
+
+def get_monthly_s1(year, month, geom):
+    start = ee.Date.fromYMD(year, month, 1)
+    end   = start.advance(1, "month")
+
+    col = (
+        ee.ImageCollection("COPERNICUS/S1_GRD")
+        .filterBounds(geom)
+        .filterDate(start, end)
+        .filter(ee.Filter.eq("instrumentMode", "IW"))
+        .filter(ee.Filter.eq("orbitProperties_pass", "DESCENDING"))
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
+    )
+
+    size = col.size()
+
+    def build(img):
+        vv = img.select("VV")
+        vh = img.select("VH")
+        ratio = vv.subtract(vh).rename("RATIO")
+        return ee.Image.cat([vv, vh, ratio])
+
+    return ee.Image(
+        ee.Algorithms.If(
+            size.gt(0),
+            build(col.median().clip(geom)),
+            ee.Image().rename([])
+        )
+    )
+
+def get_valid_months(geom, years, months):
+    valid = []
+
+    for y in years:
+        for m in months:
+            start = ee.Date.fromYMD(y, m, 1)
+            end   = start.advance(1, "month")
+
+            s2 = (
+                ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+                .filterBounds(geom)
+                .filterDate(start, end)
+                .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
+            )
+
+            s1 = (
+                ee.ImageCollection("COPERNICUS/S1_GRD")
+                .filterBounds(geom)
+                .filterDate(start, end)
+            )
+
+            cond = s2.size().gt(0).And(s1.size().gt(0))
+
+            valid.append(
+                ee.Algorithms.If(cond, ee.List([y, m]), None)
+            )
+
+    return (
+        ee.List(valid)
+        .removeAll([None])
+        .getInfo()
+    )
+
+def get_monthly_s2_rgb(year, month, geom):
+    start = ee.Date.fromYMD(year, month, 1)
+    end   = start.advance(1, "month")
+
+    col = (
+        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        .filterBounds(geom)
+        .filterDate(start, end)
+        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
+        .map(mask_s2_clouds) # Divides by 10000 -> 0-1 scale
+    )
+
+    return ee.Image(
+        ee.Algorithms.If(
+            col.size().gt(0),
+            col.median()
+               .select(["B4", "B3", "B2"])
+               .clip(geom),
+            ee.Image().rename([])
+        )
+    )
+
+
+def run_detection(geom, valid_months, out_id):
+
+    rows = []
+
+    masks_raw = {}
+    quantified_maps = {}
+
+    prev_s2 = None
+    prev_s1 = None
+    prev_change = None
+    cum_mask = None
+
+    for y, m in valid_months:
+
+        s2_idx = get_monthly_s2_indices(y, m, geom)
+        s2_rgb = get_monthly_s2_rgb(y, m, geom)
+        s1 = get_monthly_s1(y, m, geom)
+
+        if s2_idx is None or s2_rgb is None or s1 is None:
+            continue
+
+        if prev_s2 is None or prev_s1 is None:
+            prev_s2, prev_s1 = s2_idx, s1
+            continue
+
+        # ---------- CVA ----------
+        d_s2 = s2_idx.subtract(prev_s2).pow(2).reduce("sum").sqrt()
+        d_s1 = s1.subtract(prev_s1).abs().reduce("sum")
+
+        opt_thresh = d_s2.reduceRegion(
+            ee.Reducer.percentile([85]),
+            geom, 10, maxPixels=1e13
+        ).values().get(0)
+
+        sar_thresh = d_s1.reduceRegion(
+            ee.Reducer.percentile([80]),
+            geom, 10, maxPixels=1e13
+        ).values().get(0)
+
+        opt_thresh_img = ee.Image.constant(opt_thresh)
+        sar_thresh_img = ee.Image.constant(sar_thresh)
+
+        candidate = d_s2.gt(opt_thresh_img).Or(
+            d_s1.gt(sar_thresh_img)
+        )
+
+        stable = candidate if prev_change is None else candidate.And(prev_change)
+        cum_mask = stable if cum_mask is None else cum_mask.Or(stable)
+
+        date_key = f"{y}-{m:02d}-01"
+
+        masks_raw[date_key] = cum_mask.rename("mine_mask")
+
+        # ---------- VISUALIZATION LOGIC ----------
+        ndvi = s2_idx.select("NDVI")
+        
+        # 1. Create mask where mining exists AND no veg
+        # 2. .selfMask() makes the 0s transparent
+        viz_mask = cum_mask.And(ndvi.lte(0.3)).selfMask()
+
+        # 3. Apply mask to RGB
+        viz_rgb = s2_rgb.updateMask(viz_mask)
+
+        png_path = f"outputs/{out_id}/{date_key}.png"
+        
+        # 4. EXPORT with correct scale. 
+        # S2 data here is 0.0-1.0. We use max=0.3 to stretch contrast like standard RGB viz.
+        export_png(viz_rgb, geom, png_path, bands=["B4", "B3", "B2"], min=0, max=0.3)
+
+        quantified_maps[date_key] = png_path.replace("outputs", "/static")
+
+        # ---------- AREA CALCULATION ----------
+        cum_mask_named = cum_mask.rename("mine_mask")
+        area_img = cum_mask_named.multiply(ee.Image.pixelArea())
+
+        area = (
+            area_img.reduceRegion(
+                ee.Reducer.sum(),
+                geom, 10, maxPixels=1e13
+            ).get("mine_mask")
+        )
+
+        area_val = ee.Number(area).divide(1e6).getInfo() if area else 0.0
+
+        rows.append({
+            "date": date_key,
+            "area_km2": area_val
+        })
+
+        prev_s2, prev_s1, prev_change = s2_idx, s1, candidate
+
+
+    return {
+        "timeseries": rows,
+        "masks_raw": masks_raw,
+        "quantified_maps": quantified_maps,
+        "analysis_start": rows[0]["date"] if rows else None,
+        "analysis_end": rows[-1]["date"] if rows else None
+    }
+
+
+def first_violation(timeseries):
+    for row in timeseries:
+        if row["area_km2"] > 0:
+            return row["date"]
+    return None
+
+def compute_monthly_growth(timeseries):
+    growth = []
+    for i in range(1, len(timeseries)):
+        g = timeseries[i]["area_km2"] - timeseries[i-1]["area_km2"]
+        growth.append({
+            "date": timeseries[i]["date"],
+            "growth_km2": g
+        })
+    return growth
+
+
+def predict_next_month(timeseries):
+    if len(timeseries) < 2:
+        return None
+
+    x = np.arange(len(timeseries))
+    y = np.array([t["area_km2"] for t in timeseries])
+
+    coeffs = np.polyfit(x, y, 1)   # linear trend
+    next_area = coeffs[0] * (len(timeseries)) + coeffs[1]
+
+    return float(next_area)
+
+
+def classify_alert(area_km2, zone_area_km2):
+    pct = (area_km2 / zone_area_km2) * 100 if zone_area_km2 > 0 else 0
+
+    if pct == 0:
+        return "none"
+    elif pct < 1:
+        return "soft"
+    else:
+        return "hard"
+
+
+# ---------- CORE PIPELINE ----------
+def run_pipeline(mine_geojson, no_go_geojson_list=None):
+    global PIPELINE_PROGRESS
+    PIPELINE_PROGRESS["status"] = "running"
+    PIPELINE_PROGRESS["progress"] = 10
+    try:
+        t0 = time.time()
+        PIPELINE_PROGRESS["status"] = "running"
+        PIPELINE_PROGRESS["progress"] = 0
+        init_ee()
+        PIPELINE_PROGRESS["progress"] = 10
+        mine_geom = geojson_to_ee(mine_geojson)
+        no_go_geoms = []
+        if no_go_geojson_list:
+            no_go_geoms = [geojson_to_ee(g) for g in no_go_geojson_list]
+        PIPELINE_PROGRESS["progress"] = 20
+        years  = range(2020, 2025)
+        months = [1, 3, 5, 7, 9, 11]
+
+        valid_months = get_valid_months(mine_geom, years, months)
+        valid_months = sorted(valid_months)
+        PIPELINE_PROGRESS["progress"] = 30
+        mine_out = run_detection(mine_geom, valid_months, out_id="mine")
+        PIPELINE_PROGRESS["progress"] = 60
+        no_go_outs = []
+        total_zones = len(no_go_geoms)
+        if total_zones == 0:
+            PIPELINE_PROGRESS["progress"] = 80
+        else:
+            for i, zg in enumerate(no_go_geoms):
+                no_go_outs.append(
+                    run_detection(zg, valid_months, out_id=f"no_go_zone_{i}")
+                )
+                PIPELINE_PROGRESS["progress"] = 60 + int(20 * (i + 1) / total_zones)
+
+        mine_ts = mine_out["timeseries"]
+        mine_area_total = (
+            mine_geom.area().divide(1e6).getInfo()
+        )
+
+        current_area = mine_ts[-1]["area_km2"] if mine_ts else 0.0
+        current_pct = (current_area / mine_area_total) * 100 if mine_area_total > 0 else 0
+        
+        monthly_growth = compute_monthly_growth(mine_ts)
+        current_month_growth = monthly_growth[-1]["growth_km2"] if monthly_growth else 0.0
+        
+        mine_predicted_next_area = predict_next_month(mine_ts)
+
+        no_go_results = {}
+
+        for i, (zg, out) in enumerate(zip(no_go_geoms, no_go_outs)):
+            zone_ts = out["timeseries"]
+
+            zone_area = zg.area().divide(1e6).getInfo()
+            zone_current = zone_ts[-1]["area_km2"] if zone_ts else 0.0
+            zone_pct = (zone_current / zone_area) * 100 if zone_area > 0 else 0.0
+
+            alerts_log = []
+            prev_area = 0.0
+
+            for row in zone_ts:
+                growth = row["area_km2"] - prev_area
+                alert = classify_alert(row["area_km2"], zone_area)
+
+                alerts_log.append({
+                    "date": row["date"],
+                    "area_km2": row["area_km2"],
+                    "growth_km2": growth,
+                    "alert": alert
+                })
+
+                prev_area = row["area_km2"]
+
+            zone_predicted_next_area = predict_next_month(zone_ts)
+            zone_predicted_next_alert = classify_alert(
+                zone_predicted_next_area or 0.0,
+                zone_area
+            )
+
+            no_go_results[f"no_go_zone_{i}"] = {
+                "timeseries": zone_ts,
+                "current_area_km2": zone_current,
+                "percentage_mined": zone_pct,
+                "alerts": alerts_log,
+                "first_violation": first_violation(zone_ts),
+                "monthly_growth": compute_monthly_growth(zone_ts),
+                "predicted_next_area": zone_predicted_next_area,
+                "predicted_next_alert": zone_predicted_next_alert,
+                "analysis_start": out["analysis_start"],
+                "analysis_end": out["analysis_end"]
+            }
+
+
+        mine_ts = sorted(mine_ts, key=lambda x: x["date"])
+        PIPELINE_PROGRESS["progress"] = 90
+        print("Runtime:", time.time() - t0)
+        PIPELINE_PROGRESS["status"] = "done"
+        PIPELINE_PROGRESS["progress"] = 100
+        results = {
+            "metadata": {
+                "analysis_start": mine_out["analysis_start"],
+                "analysis_end": mine_out["analysis_end"],
+                "valid_months": valid_months
+            },
+            "mine": {
+                "timeseries": mine_ts,
+                "current_area_km2": current_area,
+                "percentage_mined": current_pct,
+                "monthly_growth": monthly_growth,
+                "current_month_growth": current_month_growth,
+                "predicted_next_month_area": mine_predicted_next_area,
+                "quantified_maps": mine_out["quantified_maps"]
+            },
+            "no_go_zones": no_go_results,
+            "no_go_quantified_maps": {
+                f"no_go_zone_{i}": out["quantified_maps"]
+                for i, out in enumerate(no_go_outs)
+            }
+        }
+        try:
+            output_path = "output.json"
+            with open(output_path, "w") as f:
+                json.dump(results, f, indent=4)
+            print(f"✅ Output successfully saved to {os.path.abspath(output_path)}")
+        except Exception as e:
+            print(f"❌ Failed to save output.json: {e}")
+        # -----------------------------------------------
+
+        return results
+    except Exception as e:
+        PIPELINE_PROGRESS["status"] = "error"
+        PIPELINE_PROGRESS["error"] = str(e)
+        raise e
+    
