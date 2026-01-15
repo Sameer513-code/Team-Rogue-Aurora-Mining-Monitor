@@ -1,0 +1,28 @@
+# Core Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+
+# CORS & Static Files
+python-multipart==0.0.6
+
+# Google Earth Engine
+earthengine-api==0.1.384
+google-auth==2.25.2
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+
+# Data Processing
+numpy==1.26.2
+
+# HTTP Requests (for downloading GEE thumbnails)
+requests==2.31.0
+
+# Optional: Jupyter Support (if using main_pipeline.ipynb)
+# jupyter==1.0.0
+# notebook==7.0.6
+# ipykernel==6.27.1
+
+# Optional: GeoJSON Validation (recommended for production)
+# geojson==3.1.0
+# shapely==2.0.2
