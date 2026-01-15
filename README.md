@@ -10,6 +10,8 @@ An end-to-end Geospatial Decision Support System (DSS) for automated monitoring 
 
 This system leverages **multi-sensor satellite fusion (Sentinel-2 & Sentinel-1)** and **adaptive statistical thresholding** to convert raw earth observation data into auditable excavation metrics, violation logs, and interactive visual analytics.
 
+Mining activity and compliance monitoring dashboard preview:
+![Dashboard Preview](dashbaord_preview.png)
 ---
 
 ## Key Features
