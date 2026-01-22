@@ -75,6 +75,14 @@
         <div class="grid">
             <div class="map" id="mapContainer">
                 <div id="mapCanvas" class="map-canvas"></div>
+
+                <div id="quantifiedView" class="map-canvas"
+                    style="display: none; background: #1e293b; align-items: center; justify-content: center; overflow: hidden;">
+                    <img id="mainQuantifiedImage" src="" alt="Analysis Map"
+                        style="max-width: 100%; max-height: 100%; object-fit: contain;">
+                    <div id="noImageMsg" style="display:none; color: #94a3b8;">No data available for this date</div>
+                </div>
+
                 <div class="layers">
                     <h5>Map Controls</h5>
                     <div id="layerInfo">Visualizing Output</div>
@@ -114,7 +122,7 @@
                         </div>
                         <input type="range" class="slider" id="slider" min="0" max="100" value="0">
                     </div>
-                    
+
                     <button class="quantified-btn" id="quantifiedBtn">View Quantified Maps</button>
                 </div>
 
