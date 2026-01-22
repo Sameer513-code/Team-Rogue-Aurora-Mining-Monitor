@@ -268,10 +268,12 @@ function updateDashboard(index) {
         slider.max = currentData.legal.length - 1;
         slider.value = index;
     }
+    if (isQuantifiedView) {
+        updateQuantifiedImage(index);
+    }
 
     updateTimeline(index);
 }
-
 function updateTimeline(currentIndex) {
     const container = document.getElementById("timeline");
     if(!container) return;
@@ -279,65 +281,50 @@ function updateTimeline(currentIndex) {
     // Clear previous entries
     container.innerHTML = ""; 
 
-    // Get Data
-    const row = currentData.legal[currentIndex];
-    const nogoRow = currentData.nogo && currentData.nogo[currentIndex] ? currentData.nogo[currentIndex] : { area_km2: 0, date: row.date };
     const VIOLATION_LIMIT = 0.002;
-    const isViolated = nogoRow.area_km2 > VIOLATION_LIMIT;
-    
-    // Find first historical violation
-    let firstViolationDate = null;
-    if(currentData.nogo) {
-        for (let i = 0; i <= currentIndex; i++) {
-            const area = currentData.nogo[i] ? currentData.nogo[i].area_km2 : 0;
-            if (area > VIOLATION_LIMIT) {
-                firstViolationDate = currentData.nogo[i].date;
-                break; 
-            }
-        }
+    let htmlBuilder = "";
+
+    // Iterate from the current index BACKWARDS to 0
+    // This creates a "Log" feel where the latest events are at the top
+    for (let i = currentIndex; i >= 0; i--) {
+        
+        // Get Data for this specific historical point
+        const row = currentData.legal[i];
+        const nogoRow = currentData.nogo && currentData.nogo[i] ? currentData.nogo[i] : { area_km2: 0, date: row.date };
+        
+        const isViolated = nogoRow.area_km2 > VIOLATION_LIMIT;
+        
+        // Define Styles based on status
+        const statusClass = isViolated ? "status-danger" : "status-safe";
+        const titleText = isViolated ? "VIOLATION DETECTED" : "COMPLIANT";
+        const icon = isViolated ? "⚠️" : "🛡️";
+
+        // Build the Card HTML
+        // We removed the "First Breach Recorded" summary because now 
+        // the actual breach entries are visible in the list below this one.
+        htmlBuilder += `
+            <div class="audit-entry ${statusClass}" style="margin-bottom: 10px; border-left-width: 4px;">
+                <div class="audit-date" style="display:flex; justify-content:space-between; font-size: 0.8rem; opacity: 0.8; margin-bottom:4px;">
+                    <span>LOG_ID: ${i.toString().padStart(4, '0')}</span>
+                    <span>${row.date}</span>
+                </div>
+                
+                <div class="audit-title" style="font-weight: 600; margin-bottom: 4px; display:flex; align-items:center; gap:6px;">
+                    ${icon} ${titleText}
+                </div>
+                
+                <div class="audit-metric" style="font-size: 0.9rem;">
+                    Illegal Excavation: <b>${nogoRow.area_km2.toFixed(4)} km²</b>
+                    <div style="font-size: 0.75rem; opacity: 0.6; margin-top:2px;">
+                        Threshold Limit: ${VIOLATION_LIMIT} km²
+                    </div>
+                </div>
+            </div>
+        `;
     }
 
-    // --- CREATE ENTRY ELEMENT ---
-    const div = document.createElement("div");
-    
-    // Add Base Class + Dynamic Status Class
-    div.classList.add("audit-entry");
-    div.classList.add(isViolated ? "status-danger" : "status-safe");
-
-    // Dynamic Content
-    const titleText = isViolated ? "VIOLATION DETECTED" : "OK";
-    const icon = isViolated ? "⚠️" : "🛡️";
-
-    // Historical Context HTML (Conditional)
-    let historyHTML = "";
-    if (firstViolationDate) {
-        historyHTML = `
-        <div class="audit-history">
-            <span>First Breach Recorded:</span> <b>${firstViolationDate}</b>
-        </div>`;
-    }
-
-    // Assemble HTML
-    div.innerHTML = `
-        <div class="audit-date">
-            <span>LOG_ID: ${currentIndex.toString().padStart(4, '0')}</span>
-            <span>${row.date}</span>
-        </div>
-        
-        <div class="audit-title">
-            ${icon} ${titleText}
-        </div>
-        
-        <div class="audit-metric">
-            Illegal Excavation: <b>${nogoRow.area_km2.toFixed(4)} km²</b>
-            <br>
-            <span style="opacity:0.7">Threshold Limit: ${VIOLATION_LIMIT} km²</span>
-        </div>
-        
-        ${historyHTML}
-    `;
-
-    container.appendChild(div);
+    // Inject all log entries at once
+    container.innerHTML = htmlBuilder;
 }
 // Event Listeners
 const slider = document.getElementById("slider");
@@ -353,32 +340,54 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
         if(sl) updateDashboard(parseInt(sl.value));
     });
 });
+// --- 5. View Switching Logic (Map vs Quantified Image) ---
 
-// Modal for Images
-const modal = document.getElementById("modalOverlay");
-const modalImg = document.getElementById("modalImage");
-const modalSlider = document.getElementById("modalSlider");
+let isQuantifiedView = false;
+const mapCanvas = document.getElementById("mapCanvas");
+const qView = document.getElementById("quantifiedView");
+const qImg = document.getElementById("mainQuantifiedImage");
 const qBtn = document.getElementById("quantifiedBtn");
+const noImgMsg = document.getElementById("noImageMsg");
 
-if(qBtn) {
-    qBtn.addEventListener("click", () => {
-        if (!quantifiedMaps.length) return;
-        modal.classList.add("active");
-        modalSlider.max = quantifiedMaps.length - 1;
-        modalSlider.value = 0;
-        updateModal(0);
-    });
+// Helper to update the image source
+function updateQuantifiedImage(idx) {
+    if (!quantifiedMaps[idx] || !quantifiedMaps[idx].src) {
+        qImg.style.display = 'none';
+        noImgMsg.style.display = 'block';
+        return;
+    }
+    noImgMsg.style.display = 'none';
+    qImg.style.display = 'block';
+    qImg.src = quantifiedMaps[idx].src;
 }
 
-document.getElementById("modalClose").addEventListener("click", () => {
-    modal.classList.remove("active");
-});
+if (qBtn) {
+    qBtn.addEventListener("click", () => {
+        // Toggle State
+        isQuantifiedView = !isQuantifiedView;
+        const sliderVal = parseInt(document.getElementById("slider").value) || 0;
 
-if(modalSlider) modalSlider.addEventListener("input", (e) => updateModal(e.target.value));
+        if (isQuantifiedView) {
+            // SWITCH TO IMAGE MODE
+            mapCanvas.style.display = "none";
+            qView.style.display = "flex"; 
+            qBtn.innerText = "Back to Satellite Map";
+            qBtn.classList.add("active-mode"); // Optional styling
+            
+            // Immediately load the image for the current slider position
+            updateQuantifiedImage(sliderVal);
+            
+        } else {
+            // SWITCH TO MAP MODE
+            qView.style.display = "none";
+            mapCanvas.style.display = "block";
+            qBtn.innerText = "View Quantified Maps";
+            qBtn.classList.remove("active-mode");
 
-function updateModal(idx) {
-    if(!quantifiedMaps[idx]) return;
-    const item = quantifiedMaps[idx];
-    modalImg.src = item.src;
-    document.getElementById("modalInfo").innerText = `${item.date} (${parseInt(idx)+1}/${quantifiedMaps.length})`;
+            // Fix Leaflet rendering issues when container is unhidden
+            setTimeout(() => {
+                if (map) map.invalidateSize();
+            }, 100);
+        }
+    });
 }
