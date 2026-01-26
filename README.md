@@ -1,6 +1,6 @@
 # Adaptive Geospatial System for Autonomous Mining Monitoring
 
-### Team Rogue | AURORA 2.0 Submission
+### Team Rogue | AURORA 2.0 – First-Place Solution
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Google%20Earth%20Engine-green)
@@ -90,7 +90,7 @@ If you do not have a service account key, modify `pipeline.py` to use the intera
 Rename your downloaded key file to `key.json` and place it in the root directory of this project:
 
 ```bash   
-team-rogue-aurora/
+Team-Rogue-Aurora-Mining-Monitor/
 ├── key.json  ← Place here
 ├── pipeline.py
 └── ...

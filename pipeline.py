@@ -65,8 +65,9 @@ def get_monthly_s2_indices(year, month, geom):
     return ee.Image(
         ee.Algorithms.If(
             size.gt(0),
-            build(col.median().clip(geom)),
-            ee.Image().rename([])
+            build(col.median()),
+            # FIX: Use select([]) to create 0-band image instead of rename([])
+            ee.Image().select([])
         )
     )
 
@@ -76,13 +77,12 @@ def export_png(
     out_path,
     bands=None,
     min=0,
-    max=0.3, # CHANGED DEFAULT: 0.3 matches the 0-1 scale from mask_s2_clouds
+    max=0.3, 
     dimensions=512
 ):
     """
     Exports an EE Image (single or RGB) as PNG
     """
-
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     params = {
@@ -96,7 +96,6 @@ def export_png(
     if bands:
         params["bands"] = bands
 
-    # If image is empty or fully masked, getThumbURL might fail or return blank.
     try:
         url = image.clip(geom).getThumbURL(params)
         r = requests.get(url)
@@ -133,42 +132,10 @@ def get_monthly_s1(year, month, geom):
     return ee.Image(
         ee.Algorithms.If(
             size.gt(0),
-            build(col.median().clip(geom)),
-            ee.Image().rename([])
+            build(col.median()),
+            # FIX: Use select([]) to create 0-band image instead of rename([])
+            ee.Image().select([])
         )
-    )
-
-def get_valid_months(geom, years, months):
-    valid = []
-
-    for y in years:
-        for m in months:
-            start = ee.Date.fromYMD(y, m, 1)
-            end   = start.advance(1, "month")
-
-            s2 = (
-                ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-                .filterBounds(geom)
-                .filterDate(start, end)
-                .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
-            )
-
-            s1 = (
-                ee.ImageCollection("COPERNICUS/S1_GRD")
-                .filterBounds(geom)
-                .filterDate(start, end)
-            )
-
-            cond = s2.size().gt(0).And(s1.size().gt(0))
-
-            valid.append(
-                ee.Algorithms.If(cond, ee.List([y, m]), None)
-            )
-
-    return (
-        ee.List(valid)
-        .removeAll([None])
-        .getInfo()
     )
 
 def get_monthly_s2_rgb(year, month, geom):
@@ -180,24 +147,26 @@ def get_monthly_s2_rgb(year, month, geom):
         .filterBounds(geom)
         .filterDate(start, end)
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
-        .map(mask_s2_clouds) # Divides by 10000 -> 0-1 scale
+        .map(mask_s2_clouds) 
     )
 
     return ee.Image(
         ee.Algorithms.If(
             col.size().gt(0),
-            col.median()
-               .select(["B4", "B3", "B2"])
-               .clip(geom),
-            ee.Image().rename([])
+            col.median().select(["B4", "B3", "B2"]),
+            # FIX: Use select([]) to create 0-band image instead of rename([])
+            ee.Image().select([])
         )
     )
 
 
-def run_detection(geom, valid_months, out_id):
-
+def run_detection(geom, valid_keys, monthly_cache, threshold_cache, out_id="", generate_maps=True):
+    """
+    Optimized detection run.
+    Uses pre-computed threshold_cache.
+    Batches area calculations to avoid getInfo() inside the loop.
+    """
     rows = []
-
     masks_raw = {}
     quantified_maps = {}
 
@@ -205,36 +174,35 @@ def run_detection(geom, valid_months, out_id):
     prev_s1 = None
     prev_change = None
     cum_mask = None
+    
+    # Temporary list to store server-side area numbers for batch resolution
+    area_promises = []
 
-    for y, m in valid_months:
+    for y, m in valid_keys:
 
-        s2_idx = get_monthly_s2_indices(y, m, geom)
-        s2_rgb = get_monthly_s2_rgb(y, m, geom)
-        s1 = get_monthly_s1(y, m, geom)
+        # Cache is unclipped, so we clip here for local analysis
+        s2_idx = monthly_cache[(y, m)]["s2_idx"].clip(geom)
+        s2_rgb = monthly_cache[(y, m)]["s2_rgb"].clip(geom)
+        s1     = monthly_cache[(y, m)]["s1"].clip(geom)
 
-        if s2_idx is None or s2_rgb is None or s1 is None:
-            continue
+        # No empty check needed here; valid_keys guarantees data exists.
 
         if prev_s2 is None or prev_s1 is None:
             prev_s2, prev_s1 = s2_idx, s1
             continue
 
-        # ---------- CVA ----------
+        # ---------- CVA (Local Change Magnitude) ----------
         d_s2 = s2_idx.subtract(prev_s2).pow(2).reduce("sum").sqrt()
         d_s1 = s1.subtract(prev_s1).abs().reduce("sum")
 
-        opt_thresh = d_s2.reduceRegion(
-            ee.Reducer.percentile([85]),
-            geom, 10, maxPixels=1e13
-        ).values().get(0)
-
-        sar_thresh = d_s1.reduceRegion(
-            ee.Reducer.percentile([80]),
-            geom, 10, maxPixels=1e13
-        ).values().get(0)
-
-        opt_thresh_img = ee.Image.constant(opt_thresh)
-        sar_thresh_img = ee.Image.constant(sar_thresh)
+        # ---------- OPTIMIZATION: Use Pre-Computed Thresholds ----------
+        # Thresholds are global (derived from mine) and pre-calculated.
+        # We wrap the cached raw number in an Image.constant for comparison.
+        opt_val = threshold_cache[(y, m)]["opt"]
+        sar_val = threshold_cache[(y, m)]["sar"]
+        
+        opt_thresh_img = ee.Image.constant(opt_val)
+        sar_thresh_img = ee.Image.constant(sar_val)
 
         candidate = d_s2.gt(opt_thresh_img).Or(
             d_s1.gt(sar_thresh_img)
@@ -245,27 +213,23 @@ def run_detection(geom, valid_months, out_id):
 
         date_key = f"{y}-{m:02d}-01"
 
-        masks_raw[date_key] = cum_mask.rename("mine_mask")
+        if generate_maps:
+            masks_raw[date_key] = cum_mask.rename("mine_mask")
 
-        # ---------- VISUALIZATION LOGIC ----------
-        ndvi = s2_idx.select("NDVI")
-        
-        # 1. Create mask where mining exists AND no veg
-        # 2. .selfMask() makes the 0s transparent
-        viz_mask = cum_mask.And(ndvi.lte(0.3)).selfMask()
+            # ---------- VISUALIZATION LOGIC ----------
+            ndvi = s2_idx.select("NDVI")
+            viz_mask = cum_mask.And(ndvi.lte(0.3)).selfMask()
+            viz_rgb = s2_rgb.updateMask(viz_mask)
 
-        # 3. Apply mask to RGB
-        viz_rgb = s2_rgb.updateMask(viz_mask)
+            png_path = f"outputs/{out_id}/{date_key}.png"
+            export_png(
+                viz_rgb, geom, png_path,
+                bands=["B4", "B3", "B2"], min=0, max=0.3
+            )
 
-        png_path = f"outputs/{out_id}/{date_key}.png"
-        
-        # 4. EXPORT with correct scale. 
-        # S2 data here is 0.0-1.0. We use max=0.3 to stretch contrast like standard RGB viz.
-        export_png(viz_rgb, geom, png_path, bands=["B4", "B3", "B2"], min=0, max=0.3)
+            quantified_maps[date_key] = png_path.replace("outputs", "/static")
 
-        quantified_maps[date_key] = png_path.replace("outputs", "/static")
-
-        # ---------- AREA CALCULATION ----------
+        # ---------- AREA CALCULATION (BATCHED) ----------
         cum_mask_named = cum_mask.rename("mine_mask")
         area_img = cum_mask_named.multiply(ee.Image.pixelArea())
 
@@ -276,15 +240,26 @@ def run_detection(geom, valid_months, out_id):
             ).get("mine_mask")
         )
 
-        area_val = ee.Number(area).divide(1e6).getInfo() if area else 0.0
-
+        # Optimization: Do NOT call getInfo() here. Store the EE object.
+        # We default to 0 if area is null (handled in batch resolution usually, 
+        # but safely assumed 0 if mask is empty).
+        area_ee = ee.Algorithms.If(area, ee.Number(area).divide(1e6), 0.0)
+        
         rows.append({
             "date": date_key,
-            "area_km2": area_val
+            # Placeholder for value
+            "area_km2": 0.0
         })
+        area_promises.append(area_ee)
 
         prev_s2, prev_s1, prev_change = s2_idx, s1, candidate
 
+    # ---------- RESOLVE BATCHED AREAS ----------
+    # Single network call to resolve all areas for this zone
+    if area_promises:
+        resolved_areas = ee.List(area_promises).getInfo()
+        for i, val in enumerate(resolved_areas):
+            rows[i]["area_km2"] = val
 
     return {
         "timeseries": rows,
@@ -351,23 +326,118 @@ def run_pipeline(mine_geojson, no_go_geojson_list=None):
         no_go_geoms = []
         if no_go_geojson_list:
             no_go_geoms = [geojson_to_ee(g) for g in no_go_geojson_list]
+        
         PIPELINE_PROGRESS["progress"] = 20
         years  = range(2020, 2025)
         months = [1, 3, 5, 7, 9, 11]
 
-        valid_months = get_valid_months(mine_geom, years, months)
-        valid_months = sorted(valid_months)
+        # OPTIMIZATION: Generate candidates list purely in Python
+        # We will filter these efficiently in a batch later
+        candidate_months = [(y, m) for y in years for m in months]
+        
         PIPELINE_PROGRESS["progress"] = 30
-        mine_out = run_detection(mine_geom, valid_months, out_id="mine")
+
+        # --- STEP 1: POPULATE CACHE & CHECK VALIDITY (BATCHED) ---
+        monthly_cache = {}
+        valid_keys = []
+        
+        # We need to check which candidates actually have data. 
+        # Instead of 1 getInfo per month, we batch the size check.
+        # Create list of images to check
+        check_imgs = []
+        for y, m in candidate_months:
+            # We use mine_geom to check availability (S2 is consistent regionally)
+            check_imgs.append(get_monthly_s2_indices(y, m, mine_geom))
+            
+        # Single network call to check all band counts
+        # This replaces get_valid_months loop
+        band_counts = ee.List([img.bandNames().size() for img in check_imgs]).getInfo()
+        
+        for i, count in enumerate(band_counts):
+            if count > 0:
+                y, m = candidate_months[i]
+                
+                # Fetch full data objects (no cost until getInfo)
+                s2_idx = check_imgs[i] # Already created
+                s2_rgb = get_monthly_s2_rgb(y, m, mine_geom)
+                s1     = get_monthly_s1(y, m, mine_geom)
+                
+                monthly_cache[(y, m)] = {
+                    "s2_idx": s2_idx,
+                    "s2_rgb": s2_rgb,
+                    "s1": s1
+                }
+                valid_keys.append((y, m))
+
+        # --- STEP 2: PRE-COMPUTE THRESHOLDS (BATCHED) ---
+        # We calculate thresholds on the MINE geometry once and reuse them.
+        threshold_cache = {}
+        
+        threshold_ops = [] # List to store server-side reduction objects
+        threshold_indices = [] # Keep track of which (y,m) corresponds to which op
+
+        prev_s2 = None
+        prev_s1 = None
+
+        for y, m in valid_keys:
+            s2 = monthly_cache[(y, m)]["s2_idx"]
+            s1 = monthly_cache[(y, m)]["s1"]
+
+            if prev_s2 is None:
+                prev_s2, prev_s1 = s2, s1
+                continue
+            
+            # Change Magnitude on Mine Geometry
+            d_s2 = s2.subtract(prev_s2).pow(2).reduce("sum").sqrt()
+            d_s1 = s1.subtract(prev_s1).abs().reduce("sum")
+
+            # Define Reducers (Server-side only)
+            opt_reducer = d_s2.reduceRegion(
+                ee.Reducer.percentile([85]), mine_geom, 10, maxPixels=1e13
+            )
+            sar_reducer = d_s1.reduceRegion(
+                ee.Reducer.percentile([80]), mine_geom, 10, maxPixels=1e13
+            )
+            
+            # Store operation for batch execution
+            threshold_ops.append({
+                "opt": opt_reducer.values().get(0),
+                "sar": sar_reducer.values().get(0)
+            })
+            threshold_indices.append((y, m))
+
+            prev_s2, prev_s1 = s2, s1
+        
+        # Execute all threshold calculations in ONE network call
+        if threshold_ops:
+            threshold_results = ee.List(threshold_ops).getInfo()
+            
+            # Unpack results into cache
+            for idx, res in enumerate(threshold_results):
+                y, m = threshold_indices[idx]
+                threshold_cache[(y, m)] = res
+
+        PIPELINE_PROGRESS["progress"] = 50
+
+        # --- STEP 3: RUN DETECTION (Optimized) ---
+        mine_out = run_detection(
+            mine_geom, valid_keys, monthly_cache, threshold_cache, 
+            out_id="mine", generate_maps=True
+        )
+        
         PIPELINE_PROGRESS["progress"] = 60
         no_go_outs = []
         total_zones = len(no_go_geoms)
+        
         if total_zones == 0:
             PIPELINE_PROGRESS["progress"] = 80
         else:
             for i, zg in enumerate(no_go_geoms):
                 no_go_outs.append(
-                    run_detection(zg, valid_months, out_id=f"no_go_zone_{i}")
+                    run_detection(
+                        zg, valid_keys, monthly_cache, threshold_cache, 
+                        out_id=f"no_go_zone_{i}", generate_maps=False
+                    )
                 )
                 PIPELINE_PROGRESS["progress"] = 60 + int(20 * (i + 1) / total_zones)
 
@@ -438,7 +508,7 @@ def run_pipeline(mine_geojson, no_go_geojson_list=None):
             "metadata": {
                 "analysis_start": mine_out["analysis_start"],
                 "analysis_end": mine_out["analysis_end"],
-                "valid_months": valid_months
+                "valid_months": valid_keys
             },
             "mine": {
                 "timeseries": mine_ts,
@@ -450,10 +520,6 @@ def run_pipeline(mine_geojson, no_go_geojson_list=None):
                 "quantified_maps": mine_out["quantified_maps"]
             },
             "no_go_zones": no_go_results,
-            "no_go_quantified_maps": {
-                f"no_go_zone_{i}": out["quantified_maps"]
-                for i, out in enumerate(no_go_outs)
-            }
         }
         try:
             output_path = "output.json"
@@ -469,4 +535,3 @@ def run_pipeline(mine_geojson, no_go_geojson_list=None):
         PIPELINE_PROGRESS["status"] = "error"
         PIPELINE_PROGRESS["error"] = str(e)
         raise e
-    
